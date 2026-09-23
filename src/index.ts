@@ -1,176 +1,103 @@
-import { PiChat, sessionChangeListener } from "./pi.js";
-import * as messageMap from "./messageSessionMap.js";
-import { Client, DMChannel, IntentsBitField, Message, Partials } from 'discord.js';
-import { Events } from "discord.js";
-import PQueue, { PriorityQueue, QueueAddOptions } from "p-queue";
+import { PiChat } from './pi.js';
+import * as messageMap from './messageSessionMap.js';
 import * as dotenv from 'dotenv';
-import path from "path";
-import { fileURLToPath } from "url";
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { createDiscordDMSession } from './discord.js';
+import { affirmativeResponse, thinkingResponse } from './util/flavorText.js';
+
+if (!process.env.USER_ID) throw new Error('USER_ID not found. Is you env set?');
+if (!process.env.DISCORD_TOKEN) throw new Error('DISCORD_TOKEN not found. Is you env set?');
 
 const fileName = fileURLToPath(import.meta.url);
 const dirName = path.dirname(fileName);
 
 dotenv.config({ path: path.join(dirName, '../.env') });
 
-const piChat = new PiChat(process.cwd());
+const pi = new PiChat(process.cwd());
 
-const discord = new Client({
-   intents: [
-      IntentsBitField.Flags.Guilds,
-      IntentsBitField.Flags.GuildMessages,
-      IntentsBitField.Flags.MessageContent,
-      IntentsBitField.Flags.DirectMessages,
-   ],
-   partials: [Partials.Channel]
-});
+const dc = await createDiscordDMSession(process.env.USER_ID, process.env.DISCORD_TOKEN);
 
-const messageQueue: PQueue<PriorityQueue, QueueAddOptions> = new PQueue({ concurrency: 1 });
 let currentSession: string;
 
-function randomAffirmativeResponse(): string {
-   const affirmativeResponses = [
-      "on it, boss",
-      "mkay",
-      "I'll do it, but not because I want to",
-      "bow bow bow!!!"
-   ]
-   return affirmativeResponses[Math.floor(Math.random() * affirmativeResponses.length)];
-}
-
-function thinkingResponse(): string {
-   const affirmativeResponses = [
-      "Uhmmmm...",
-      "Uhhhhh...",
-      "Pondering...",
-      "Thinking..."
-   ]
-   return affirmativeResponses[Math.floor(Math.random() * affirmativeResponses.length)];
-}
-
-function validateReceivedMessage(m: Message): boolean {
-   if (m.author.bot) return false;
-
-   if (m.author.id !== process.env.USER_ID) return false;
-
-   const isDM = m.channel instanceof DMChannel;
-   if (!isDM) return false;
-   return true;
-}
-
-async function forwardMessageToUser(message: string, path: string | undefined) {
-   messageQueue.add(async () => {
-      const m = await user?.send(message)
-      if (m?.id && path)
-         messageMap.mapMessage(path, m.id);
+pi.addPiEventListener((e) => {
+   if (e.type !== 'message_end' || e.message.role !== 'assistant') return;
+   console.log(e.message.diagnostics);
+   e.message.content.forEach((m) => {
+      switch (m.type) {
+         case 'text':
+            dc.forwardMessageToUser(m.text, currentSession).then(({ message, session }) => {
+               if (message?.id) messageMap.mapMessage(session, message.id);
+            });
+            break;
+         case 'thinking':
+            dc.forwardMessageToUser(`-# 💭 ${thinkingResponse()}`, currentSession);
+            break;
+      }
    });
-}
-
-piChat.addPiEventListener((e) => {
-   if (e.type === "message_end"
-      && e.message.role === "assistant"
-   )
-      e.message.content.forEach(m => {
-         switch (m.type) {
-            case "text":
-               forwardMessageToUser(m.text, currentSession);
-               break;
-            case "thinking":
-               forwardMessageToUser(`-# 🤔 ${thinkingResponse()}`, currentSession);
-         }
-      });
 });
 
-piChat.addPiEventListener((e) => {
-   if (e.type === "tool_execution_start"
-   ) {
-      forwardMessageToUser(`-# 👾 ${e.toolName} (${JSON.stringify(e.args)})`, currentSession);
+pi.addPiEventListener((e) => {
+   if (e.type === 'tool_execution_start') {
+      dc.forwardMessageToUser(`-# 👾 ${e.toolName} ${JSON.stringify(e.args)}`, currentSession);
    }
 });
 
 function onError(e: string) {
-   forwardMessageToUser(`-# ⚠️ ${e}`, currentSession);
+   dc.forwardMessageToUser(`-# ⚠️${e}`, currentSession);
 }
-piChat.addOnErrorListener(onError);
+pi.addOnErrorListener(onError);
 
-
-const onSessionChange: sessionChangeListener = async ({ name, path }) => {
-   if (path)
-      currentSession = path;
-   forwardMessageToUser(`-# Changed session: ${name ? name : path}`, path)
-}
-piChat.addOnSessionChangeListener(onSessionChange);
-
-discord.once('clientReady', async () => {
-
-   // new command
-   await discord.application?.commands.create({
-      name: "new",
-      description: "create a new session"
-   })
-
-   console.log(`✓ Bot is online as ${discord.user?.tag}`);
+pi.addOnSessionChangeListener(({ name, path }) => {
+   if (path) currentSession = path;
+   dc.forwardMessageToUser(`-# Changed session: ${name ? name : path}`, path);
 });
 
-discord.on(Events.MessageCreate, async (message: Message) => {
-   process.stdout.write(`i got a message from: ${message.author.id}\n`);
-   if (!validateReceivedMessage(message)) return;
-   // message.author.send(message.reference?.messageId ? "thats a reply" : "-# bow bow bow");
-   message.react("🧐");
-   let text = message.content
+dc.registerCommand(
+   {
+      name: 'new',
+      description: 'new session',
+   },
+   async (interaction) => {
+      if (interaction.commandName === 'new') currentSession = await pi.newSession();
+      interaction.reply(affirmativeResponse());
+   },
+);
 
+dc.addOnMessageListener((m) => {
+   if (m.reference) return;
 
-   if (message.reference) {
-      message.react("↩️");
-      const ref = await message.fetchReference()
+   m.react('🧐');
+   const prompt = m.content;
 
-      if (ref.content) {
-         text = `in response to: "${ref.content}"\n${text}`
-         process.stdout.write(text)
-      }
-
-      if (
-         ref.content
-         && ref.id
-      ) {
-         const referencesSession = messageMap.selectSessionFromMessage(ref.id);
-         if (referencesSession) {
-            process.stdout.write(`Found the session: ${referencesSession}`);
-            currentSession = referencesSession;
-         } else {
-            onError("session not found. creating new.")
-            currentSession = await piChat.newSession()
-         }
-      }
-   }
-
-   piChat.queueAction({
-      event: "message",
+   pi.queueAction({
+      event: 'message',
       args: {
-         prompt: text,
-         sessionPath: currentSession
-      }
+         prompt: prompt,
+         sessionPath: currentSession,
+      },
    });
 });
 
+dc.addOnMessageListener(async (m) => {
+   if (!m.reference) return;
 
-discord.on(Events.InteractionCreate, async (interaction) => {
-   if (!interaction.isChatInputCommand()) return;
-   if (interaction.commandName === "new")
-      messageQueue.add(async () => {
-         currentSession = await piChat.newSession()
-         interaction.reply(randomAffirmativeResponse())
-      });
-})
+   m.react('↩️');
 
-process.stdout.write(process.env.DISCORD_TOKEN?.toString() || "not found");
-// Login to the client
-void discord.login(process.env.DISCORD_TOKEN);
+   const ref = await m.fetchReference();
+   if (!ref.content) return onError('The message you responded to is empty.');
+   if (!ref.id) return onError("Couldn't fetch message ID");
 
-const user = process.env.USER_ID
-   ? await discord.users.fetch(process.env.USER_ID)
-   : undefined;
+   const referencedSession = messageMap.selectSessionFromMessage(ref.id);
+   if (!referencedSession) return onError("The message you refrerenced to isn't tied to a session");
 
-if (!user) {
-   process.stderr.write("user not found. is your gv set?")
-   process.exit(1);
-}
+   const prompt = `in response to: "${ref.content}"\n\n${m.content}`;
+
+   pi.queueAction({
+      event: 'message',
+      args: {
+         prompt: prompt,
+         sessionPath: referencedSession,
+      },
+   });
+});
