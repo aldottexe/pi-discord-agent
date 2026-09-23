@@ -6,13 +6,14 @@ import { fileURLToPath } from 'url';
 import { createDiscordDMSession } from './discord.js';
 import { affirmativeResponse, thinkingResponse } from './util/flavorText.js';
 
-if (!process.env.USER_ID) throw new Error('USER_ID not found. Is you env set?');
-if (!process.env.DISCORD_TOKEN) throw new Error('DISCORD_TOKEN not found. Is you env set?');
 
 const fileName = fileURLToPath(import.meta.url);
 const dirName = path.dirname(fileName);
 
 dotenv.config({ path: path.join(dirName, '../.env') });
+
+if (!process.env.USER_ID) throw new Error('USER_ID not found. Is you env set?');
+if (!process.env.DISCORD_TOKEN) throw new Error('DISCORD_TOKEN not found. Is you env set?');
 
 const pi = new PiChat(process.cwd());
 
